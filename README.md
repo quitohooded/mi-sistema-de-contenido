@@ -100,8 +100,10 @@ python sync_notion_buffer.py
 
 ## Licencia
 
-MIT: usalo, modificalo y hacé lo que quieras con él, para lo que quieras, incluso comercialmente.
-Lo único que se pide es que no borres el aviso de copyright. Ver [LICENSE](LICENSE).
+MIT ([LICENSE](LICENSE)). En castellano llano: hacé lo que quieras con esto —usalo, cambialo,
+integralo en algo tuyo, cobrá por lo que construyas encima—. Lo único que se pide es que no borres
+el aviso de copyright.
 
-Se entrega tal cual, sin garantía. Publica en tus redes con tu nombre: **corrélo en seco y
-entendé qué hace antes de darle `--apply`.**
+Y lo que dice el párrafo en mayúsculas de la licencia, que importa de verdad en una herramienta
+que publica en tus redes: **se entrega tal cual y sin garantía.** Corrélo en seco, entendé qué
+hace y probá con una pieza sola antes de confiarle tu cola entera.
