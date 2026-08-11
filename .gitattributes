@@ -1,0 +1,7 @@
+# Normalize line endings: keep LF in the repo and the working tree.
+* text=auto eol=lf
+
+# Treat these as text explicitly.
+*.md   text eol=lf
+*.py   text eol=lf
+*.json text eol=lf

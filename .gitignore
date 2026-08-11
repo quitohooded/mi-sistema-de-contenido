@@ -1,0 +1,18 @@
+# Tu configuración real: tiene los identificadores de tus cuentas y las rutas a tus credenciales.
+# El repo lleva sync_config.ejemplo.json, que es el molde y no tiene ningún dato de nadie.
+sync_config.json
+
+# Salidas de las herramientas de diagnóstico: son una foto de tu cola de publicación.
+estado_buffer.json
+
+# Registros de las corridas.
+*.log
+
+# Ruido de Python
+__pycache__/
+*.pyc
+
+# Ruido del sistema operativo
+Thumbs.db
+desktop.ini
+.DS_Store

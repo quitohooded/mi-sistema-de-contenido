@@ -1,0 +1,156 @@
+{
+  "_como_usar_este_archivo": [
+    "1. Copialo como `sync_config.json`, al lado de los .py.",
+    "2. Reemplaza los valores de ejemplo por los tuyos. INSTALACION.md dice de donde sale cada uno.",
+    "3. Corre `python sync_notion_buffer.py` (modo seco: lee todo y no escribe nada).",
+    "",
+    "ACA NO VA NINGUN SECRETO, NUNCA. Este archivo dice DONDE esta cada credencial, no cual es.",
+    "El '~' se expande a tu carpeta de usuario, asi que el mismo archivo funciona en otra maquina",
+    "sin editar una linea, y podes versionarlo sin exponer nada.",
+    "",
+    "Las lineas que empiezan con '_' son comentarios: JSON no tiene comentarios, asi que se usan",
+    "claves que el programa ignora. Podes borrarlas todas."
+  ],
+
+  "_zona_horaria": [
+    "Tu huso, como offset fijo. Argentina es -03:00, Espana peninsular +01:00 (o +02:00 en",
+    "verano), Mexico centro -06:00, Colombia -05:00.",
+    "NUNCA se usa UTC pelado: una fecha sin hora interpretada como medianoche UTC publicaria a",
+    "las 21 h del dia ANTERIOR."
+  ],
+  "zona_horaria": "-03:00",
+
+  "_cupo_por_canal": [
+    "Cuantos posts programados admite tu plan de Buffer POR CANAL. En el plan gratuito son 10.",
+    "El sync nunca pasa de este numero: lo que sobra espera su turno en Notion y entra solo",
+    "cuando se libera lugar."
+  ],
+  "cupo_por_canal": 10,
+
+  "_limites_por_canal": "Maximo de caracteres por red. Si una pieza se pasa, NO se publica y se reporta: el sync nunca corta ni resume lo que escribiste.",
+  "limites_por_canal": {
+    "LinkedIn": 3000,
+    "X": 280,
+    "Facebook": 60000
+  },
+
+  "_log": "Donde queda el registro de cada corrida. Corriendo sin nadie mirando, es lo unico que queda.",
+  "log": "~/.sync_notion_buffer/sync.log",
+
+  "notion": {
+    "_credencial": "Ruta al archivo de texto con el token de TU integracion de Notion. Ver INSTALACION.md, paso 2.",
+    "credencial": "~/.notion/api_key",
+
+    "_data_source": "El id de la base de datos de Notion donde viven tus piezas. Ver INSTALACION.md, paso 3.",
+    "data_source": "00000000-0000-0000-0000-000000000000",
+
+    "_propiedades": [
+      "El nombre EXACTO de cada propiedad en TU base, tal como se ve en Notion.",
+      "La izquierda es lo que el programa entiende y no se toca; la derecha es como la llamaste vos.",
+      "Podes tener la base entera en tu idioma y con tus nombres: solo cambia esta tabla."
+    ],
+    "propiedades": {
+      "titulo": "Name",
+      "estado": "Estado",
+      "canal": "Canal",
+      "espacio": "Marca",
+      "fecha": "Fecha de publicación",
+      "archivado": "Archivo",
+      "url": "URL",
+      "post_id": "Buffer Post ID",
+      "hash": "Buffer Hash",
+      "last_sync": "Buffer Last Sync",
+      "imagen": "Imagen",
+      "placa": "Placa"
+    },
+
+    "_estados": [
+      "Los dos valores del desplegable de estado que gobiernan al sync.",
+      "'aprobado' es la UNICA accion manual del sistema: hasta que vos no lo pongas, nada sale.",
+      "'publicado' lo escribe solo el programa, y solo despues de ver en Buffer que la pieza salio."
+    ],
+    "estados": {
+      "aprobado": "Aprobado",
+      "publicado": "Publicado"
+    }
+  },
+
+  "_almacenamiento": [
+    "OPCIONAL. Borra este bloque entero si no vas a publicar imagenes: el sync corre igual.",
+    "",
+    "Existe por un motivo concreto y verificado: Buffer NO se guarda una copia de la imagen",
+    "cuando programas el post. El post queda apuntando a la direccion original hasta el dia que",
+    "sale. Como la direccion que da Notion a un archivo adjunto vence en aproximadamente una",
+    "hora, un post programado para dentro de una semana saldria con la imagen rota.",
+    "Por eso la imagen se copia a un lugar publico y estable, y esa es la direccion que se manda.",
+    "",
+    "'proveedor' hoy solo acepta 'r2' (Cloudflare R2). Si escribis otra cosa el programa corta y",
+    "lo dice, en vez de usar R2 igual sin avisarte.",
+    "",
+    "'hosts_ajenos' es como el programa distingue 'a esta pieza le sacaron la imagen' de 'esta",
+    "imagen la cargue yo a mano desde la web de Buffer'. Lo que sube la web de Buffer vive en",
+    "buffer-media-uploads, y hay que dejarlo en paz."
+  ],
+  "almacenamiento": {
+    "proveedor": "r2",
+    "credencial": "~/.r2/cdn.json",
+    "user_agent": "mi-sync/1.0",
+    "peso_maximo_mb": 5,
+    "aviso_peso_mb": 1,
+    "hosts_ajenos": ["buffer-media-uploads"]
+  },
+
+  "_espacios": [
+    "Un espacio = una cuenta de Buffer con sus canales. Si tenes una sola marca, dejas una sola",
+    "entrada y listo. Si manejas varias cuentas -tuya, de tu empresa, de un cliente- agregas una",
+    "entrada por cada una, cada una con SU credencial: es lo que garantiza que una pieza de una",
+    "marca no pueda salir por los canales de otra.",
+    "",
+    "El nombre del espacio ('Mi marca') tiene que coincidir EXACTAMENTE con el valor que uses en",
+    "la propiedad de marca de Notion. Una fila con un valor que no figure aca no se procesa: se",
+    "reporta y se deja quieta.",
+    "",
+    "'cdn' es la direccion publica desde donde se van a servir tus imagenes. Solo hace falta si",
+    "usas el bloque de almacenamiento."
+  ],
+  "espacios": {
+    "Mi marca": {
+      "credencial": "~/.buffer/api_key",
+      "organizacion": "PONE_ACA_TU_ID_DE_ORGANIZACION",
+      "cdn": "https://cdn.tudominio.com",
+      "_canales": [
+        "Los ids te los imprime `python ids_buffer.py`. Son distintos entre si: si dos canales",
+        "quedan con el mismo id, el sync no puede distinguirlos y las piezas salen por donde no va.",
+        "La palabra de la izquierda tiene que ser IGUAL a la que uses en la propiedad Canal de",
+        "Notion, con las mismas mayusculas. Borra los canales que no uses."
+      ],
+      "canales": {
+        "LinkedIn": "PONE_ACA_EL_ID_DEL_CANAL_DE_LINKEDIN",
+        "X": "PONE_ACA_EL_ID_DEL_CANAL_DE_X",
+        "Facebook": "PONE_ACA_EL_ID_DEL_CANAL_DE_FACEBOOK"
+      },
+      "_slots": [
+        "Los dias y la hora en que publica cada canal. El programa usa esto para darle fecha a",
+        "una pieza aprobada que no tenga fecha puesta a mano: le busca el proximo hueco libre.",
+        "",
+        "Dos modos:",
+        "  'inline'    - los horarios se escriben aca. Es el que te conviene salvo que ya tengas",
+        "                un documento donde llevas tu calendario editorial.",
+        "  'documento' - se leen de una tabla '### Slots' de un archivo markdown tuyo, con las",
+        "                columnas | Canal | Dias separados por · | HH:MM |. Sirve para que la",
+        "                cadencia viva donde la decidis y no duplicada en dos lugares.",
+        "",
+        "Si los horarios no se pueden leer, el programa corta y no publica nada: inventar un",
+        "horario es peor que no publicar."
+      ],
+      "slots": {
+        "fuente": "inline",
+        "canales": {
+          "LinkedIn": { "dias": ["martes", "jueves"], "hora": "09:30" },
+          "X":        { "dias": ["martes", "jueves"], "hora": "10:50" },
+          "Facebook": { "dias": ["martes", "jueves"], "hora": "09:10" }
+        }
+      }
+    }
+  }
+}
