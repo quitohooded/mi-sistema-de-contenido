@@ -71,6 +71,22 @@ haciendo cosas que nadie le pidió.
 
 Todo esto se hace una vez y no se vuelve a tocar. Está paso a paso en **[INSTALACION.md](INSTALACION.md)**.
 
+## La base de Notion ya está armada
+
+No hace falta que crees nada a mano. Hay una plantilla lista para duplicar, con las doce
+propiedades que el programa espera —con sus nombres y sus tipos exactos, que es donde se pierde
+todo el mundo—, las vistas de trabajo y una página que explica el sistema en diez líneas.
+
+**[Duplicar la plantilla de Notion →](https://estebanaguilar.notion.site/Sistema-de-contenido-3ba34b7f9d25813d9b7fe3f44a8e3a36)**
+
+Duplicala en tu espacio, y cuando la instalación te pida el identificador de la base, corré
+`python ids_notion.py` con la dirección de la base duplicada. Si te dice que no falta ninguna
+propiedad, ya está: no tenés que editar el config.
+
+Si preferís armarla vos, o ya tenés una base andando con otros nombres, no hay problema —
+**[NOTION.md](NOTION.md)** tiene el detalle y el config traduce cualquier nombre al que el
+programa entiende.
+
 ## Los archivos
 
 | Archivo | Qué es |
