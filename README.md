@@ -1,4 +1,4 @@
-# sync-contenido
+# Mi sistema de contenido
 
 **Un sistema de contenido con un solo punto de control.** Escribís y decidís en Notion. El sistema
 se ocupa de todo lo demás. Nada se publica sin que vos lo apruebes, una vez, en un solo lugar.
