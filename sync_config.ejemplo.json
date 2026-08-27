@@ -34,6 +34,13 @@
     "Facebook": 60000
   },
 
+  "_imagenes_por_canal": "Cuantas imagenes suele aceptar cada red en un post. Es un AVISO, no un limite: el programa manda igual lo que hayas cargado y deja decidir a Buffer. Si Buffer la rechaza, la pieza se reporta y se reintenta sola en la corrida siguiente. Son avisos porque estos numeros salen de lo que documenta cada red y no estan medidos contra la API. Sacar una linea desactiva el aviso para esa red.",
+  "imagenes_por_canal": {
+    "LinkedIn": 20,
+    "X": 4,
+    "Facebook": 10
+  },
+
   "_log": "Donde queda el registro de cada corrida. Corriendo sin nadie mirando, es lo unico que queda.",
   "log": "~/.sync_notion_buffer/sync.log",
 

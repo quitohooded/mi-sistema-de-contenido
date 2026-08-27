@@ -145,6 +145,27 @@ que la actualización se dispare sola), y la misma imagen usada en dos piezas es
 apagaría la imagen de un post ya publicado, meses después y sin autor visible. El costo de no
 borrar es despreciable; el de borrar, invisible hasta que es tarde.
 
+### Varias imágenes en una misma pieza
+
+**Una pieza puede llevar más de una imagen: arrastrás todas a `Placa` y salen en el orden en que
+están ahí.** Ese orden lo controlás vos, moviéndolas dentro del campo.
+
+`Imagen` guarda entonces las direcciones separadas por un espacio, en ese mismo orden. Como esa
+línea entera entra en la huella, **agregar, quitar o incluso reordenar** las imágenes dispara sola
+la actualización en Buffer, sin que tengas que avisar nada.
+
+Tres detalles que valen la pena:
+
+- **La portada de la página en Notion es la primera**, que es la que representa la pieza cuando
+  mirás el tablero.
+- **Se ahorra la subida, no la publicación:** si cargás dos veces el mismo archivo, se guarda una
+  sola vez (el nombre es la huella de su contenido), pero el post lo lleva las dos veces si así lo
+  cargaste.
+- **Cuántas acepta cada red es un aviso, no un límite.** El programa manda lo que cargaste y deja
+  decidir a Buffer; si Buffer la rechaza, la pieza se reporta y se reintenta sola. Los números
+  viven en `imagenes_por_canal`, en tu configuración, y salen de lo que documenta cada red: no
+  están medidos contra la API, y por eso avisan en vez de frenar.
+
 **El tipo de archivo se detecta por los bytes, no por la extensión:** el nombre de un archivo lo
 pone una persona y puede mentir.
 
@@ -183,7 +204,7 @@ coincida**. El orden no es cosmético: es lo que hace que una pieza ya publicada
 >
 > | La fila tiene | Qué hace |
 > |---|---|
-> | `Placa` con adjunto | lo baja mientras su dirección está viva, lo valida y, si no está guardado, lo sube. Escribe `Imagen` |
+> | `Placa` con uno o varios adjuntos | los baja mientras su dirección está viva, los valida y sube los que falten, **en orden**. Escribe `Imagen` |
 > | `Placa` ya subida | **nada**, ni siquiera consulta el almacenamiento |
 > | Sin `Placa`, con `Imagen` propia | la imagen estuvo y se la sacaron → limpia `Imagen` |
 > | Sin `Placa`, con `Imagen` de otro origen | la respeta y no la toca |
@@ -278,17 +299,24 @@ ciertas y no lo eran.
 **El patrón que dejaron las tres últimas, y es la lección más útil de todo el proyecto:** *una ruta
 que nunca se ejecutó no está verificada, por más que esté escrita y revisada.*
 
+**Verificado después, con piezas ya publicadas de verdad:** Buffer **tampoco** se guarda una copia
+al publicar. Posts enviados dos semanas antes siguen apuntando a la dirección de origen. **Esto
+vuelve importante la regla de no borrar nunca del almacenamiento**: la dirección tiene que seguir
+viva indefinidamente, no solo hasta el día que sale.
+
 **Lo que sigue sin verificarse**, y conviene mirarlo el día que te pase:
 
-- Si las redes se guardan su propia copia de la imagen al publicar. No se puede saber sin publicar
-  de verdad. **No cambia ninguna regla**, porque la dirección igual tiene que estar viva ese día.
+- Si **las redes** se guardan su propia copia al publicar. Lo de arriba es la vista de Buffer, que
+  no es lo mismo. **No cambia ninguna regla**, porque la dirección igual tiene que estar viva.
+- Que una pieza de **varias** imágenes llegue publicada. Está verificado hasta el post programado
+  con todas sus imágenes y en orden; el último tramo solo lo ejercita una publicación real.
 
 ---
 
 ## Si vas a modificar el código
 
-Corré las tres baterías de pruebas antes y después. Son 88 comprobaciones con la instalación
-completa (82 si todavía no cargaste las credenciales), y ninguna publica nada:
+Corré las tres baterías de pruebas antes y después. Son 114 comprobaciones con la instalación
+completa (108 si todavía no cargaste las credenciales), y ninguna publica nada:
 
 ```bash
 python probar_config.py && python probar_placas.py && python probar_sync.py

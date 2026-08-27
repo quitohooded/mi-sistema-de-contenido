@@ -26,14 +26,22 @@ CDN = "https://cdn.ejemplo.com"
 ok = fallo = 0
 
 
-def chequear(desc, cond):
+def chequear(desc, cond, detalle=""):
     global ok, fallo
     if cond:
         ok += 1
         print(f"  OK    {desc}")
     else:
         fallo += 1
-        print(f"  FALLA {desc}")
+        # El detalle se sanitiza a ASCII a proposito: `probar_config.py` MORIA al reportar un
+        # fallo porque imprimia texto con acentos en una consola cp1252 y lanzaba
+        # UnicodeEncodeError. O sea que el banco se caia justo cuando tenia algo que decir, y
+        # con un fallo real adentro. Un verificador que no puede reportar es peor que no tenerlo.
+        extra = ""
+        if detalle != "":
+            texto = detalle if isinstance(detalle, str) else repr(detalle)
+            extra = "  <- " + texto.encode("ascii", "replace").decode("ascii")[:200]
+        print(f"  FALLA {desc}{extra}")
 
 
 class ClienteFalso:
@@ -51,13 +59,19 @@ class ClienteFalso:
         self.subidos.append((key, len(contenido), ct, meta))
 
 
-def fila(imagen="", adjunto=None):
+def fila(imagen="", adjunto=None, adjuntos=None):
+    """`adjuntos` (lista) es la forma general; `adjunto` (uno solo) se mantiene porque es como
+    estaban escritos los casos 5 a 9 y no tiene sentido reescribirlos."""
     props = {P["imagen"]: {"type": "url", "url": imagen or None}}
-    if adjunto is None:
-        props[P["placa"]] = {"type": "files", "files": []}
-    else:
-        props[P["placa"]] = {"type": "files", "files": [adjunto]}
+    if adjuntos is None:
+        adjuntos = [] if adjunto is None else [adjunto]
+    props[P["placa"]] = {"type": "files", "files": adjuntos}
     return {"id": "pg-1", "properties": props}
+
+
+def subido(url, n):
+    """Un adjunto de Notion: URL firmada que expira, por eso se baja en el momento."""
+    return {"type": "file", "file": {"url": f"{url}/{n}"}}
 
 
 def portadas(esc):
@@ -65,7 +79,7 @@ def portadas(esc):
     return [e[2] for e in esc if len(e) > 2 and e[2]]
 
 
-def materializar(f, cliente, aplicar=True, imagen=None):
+def materializar(f, cliente, aplicar=True, imagen=None, canal="LinkedIn", avisos=None):
     """Corre el paso 0 real, interceptando la escritura a Notion.
 
     `imagen` sale de la propia fila, igual que en el motor: pasarla suelta hacia que los casos
@@ -78,7 +92,8 @@ def materializar(f, cliente, aplicar=True, imagen=None):
     m.escribir = lambda pid, props, cover=None: escrituras.append((pid, props, cover))
     try:
         r = m.materializar(f, f["properties"], imagen, cliente, CDN, "EspacioX",
-                           aplicar, logs.append, "pieza")
+                           aplicar, logs.append, "pieza", canal,
+                           avisos if avisos is not None else [])
     finally:
         m.escribir = orig
     return r, escrituras, logs
@@ -260,6 +275,100 @@ chequear("agregar una placa cambia el hash", h_sin != h_con)
 chequear("cambiar la placa cambia el hash", h_con != h_otra)
 chequear("la misma placa da el mismo hash",
          h_con == m.hashear("texto", "2026-09-01T10:00:00-03:00", "cid", CDN + "/a.png"))
+
+print("\n12. VARIAS placas por pieza (la propiedad siempre lo permitio; el sync subia una sola)")
+
+# Cada URL devuelve un contenido distinto, para que las claves salgan distintas de verdad.
+# Con el mock anterior (siempre el mismo PNG) las tres habrian deduplicado a una y la prueba
+# habria pasado por la razon equivocada.
+CONTENIDOS = {"a": PNG, "b": PNG + b"bbb", "c": PNG + b"ccc"}
+a._bytes = lambda url: CONTENIDOS[url.rsplit("/", 1)[1]]
+
+c = ClienteFalso()
+tres = fila(adjuntos=[subido("https://notion-firmada", n) for n in "abc"])
+url3, esc, logs = materializar(tres, c)
+lista = m.urls(url3)
+chequear("devuelve las 3 URLs, no solo la primera", len(lista) == 3, url3)
+chequear("las 3 apuntan al CDN del espacio", all(u.startswith(CDN + "/") for u in lista))
+chequear("las 3 son distintas entre si", len(set(lista)) == 3)
+chequear("subio los 3 archivos", len(c.subidos) == 3, [k for k, *_ in c.subidos])
+chequear("escribio UNA sola vez en Notion, con las 3 juntas",
+         len(esc) == 1 and esc[0][1][P["imagen"]]["url"] == url3)
+chequear("la portada es la PRIMERA, no la ultima", portadas(esc) == [lista[0]])
+chequear("el log dice cuantas son", any("3 imagenes" in x for x in logs), logs)
+
+print("\n12b. EL ORDEN de los adjuntos es el orden de publicacion")
+# El orden lo controla Esteban arrastrando dentro de la propiedad, y tiene que sobrevivir
+# entero hasta el payload de Buffer.
+c2 = ClienteFalso()
+al_reves = fila(adjuntos=[subido("https://notion-firmada", n) for n in "cba"])
+url_rev, _, _ = materializar(al_reves, c2)
+chequear("otro orden -> otro string", url_rev != url3, f"{url3} vs {url_rev}")
+chequear("y es exactamente el inverso", m.urls(url_rev) == list(reversed(lista)))
+chequear("REORDENAR cambia el hash (dispara la actualizacion sola)",
+         m.hashear("t", "f", "cid", url3) != m.hashear("t", "f", "cid", url_rev))
+chequear("quitar una de las 3 cambia el hash",
+         m.hashear("t", "f", "cid", url3) != m.hashear("t", "f", "cid", m.junta(lista[:2])))
+
+print("\n12c. El payload a Buffer lleva un asset por imagen, en orden")
+assets = m.assets_img(url3, "el texto de la pieza")
+chequear("3 assets", len(assets) == 3, assets)
+chequear("en el mismo orden", [x["image"]["url"] for x in assets] == lista)
+chequear("cada uno con su altText dentro de metadata",
+         all(x["image"]["metadata"]["altText"] for x in assets))
+chequear("el altText numera cuando hay varias",
+         assets[1]["image"]["metadata"]["altText"].endswith("(2 de 3)"),
+         assets[1]["image"]["metadata"]["altText"])
+
+print("\n12d. CONTROL NEGATIVO: con UNA sola imagen nada cambia respecto de antes")
+uno = m.assets_img(CDN + "/a.png", "el texto de la pieza")
+chequear("un solo asset", len(uno) == 1)
+chequear("y su altText NO lleva numeracion",
+         uno[0]["image"]["metadata"]["altText"] == "el texto de la pieza"[:100],
+         uno[0]["image"]["metadata"]["altText"])
+chequear("sin imagen sigue devolviendo lista vacia", m.assets_img("", "t") == [])
+
+print("\n12e. Deduplicacion: el mismo archivo repetido se sube una sola vez")
+a._bytes = lambda url: PNG            # las dos URLs devuelven el MISMO contenido
+c3 = ClienteFalso()
+repe = fila(adjuntos=[subido("https://notion-firmada", n) for n in "ab"])
+url_rep, _, _ = materializar(repe, c3)
+chequear("declara las 2 (el post lleva la imagen dos veces si asi se cargo)",
+         len(m.urls(url_rep)) == 2, url_rep)
+chequear("pero sube UNA sola vez: la clave es el hash del contenido",
+         len(c3.subidos) == 1, [k for k, *_ in c3.subidos])
+
+print("\n12f. Aviso de cantidad: avisa sobre el tope y NO bloquea")
+a._bytes = lambda url: CONTENIDOS[url.rsplit("/", 1)[1]]
+topes = m.CFG.get("imagenes_por_canal") or {}
+if topes.get("X"):
+    avisos = []
+    c4 = ClienteFalso()
+    muchas = fila(adjuntos=[subido("https://notion-firmada", n)
+                            for n in "abc" * (topes["X"] // 2 + 2)])
+    r, esc4, _ = materializar(muchas, c4, canal="X", avisos=avisos)
+    chequear("avisa que X suele aceptar menos", len(avisos) == 1, avisos)
+    chequear("pero NO bloquea: igual escribe y sube", bool(r) and len(esc4) == 1)
+
+    avisos2 = []
+    c5 = ClienteFalso()
+    materializar(fila(adjuntos=[subido("https://notion-firmada", "a")]),
+                 c5, canal="X", avisos=avisos2)
+    chequear("CONTROL NEGATIVO: una sola imagen no dispara el aviso", not avisos2, avisos2)
+else:
+    chequear("hay topes declarados en el config", False, "falta imagenes_por_canal")
+
+print("\n12g. Un host ajeno entre varias: no se materializa NINGUNA")
+# Materializar solo las demas cambiaria `imagen` y dispararia una edicion que dejaria el post
+# con menos placas de las que tiene.
+c6 = ClienteFalso()
+mixta = fila(imagen=CDN + "/vieja.png", adjuntos=[
+    subido("https://notion-firmada", "a"),
+    {"type": "external", "external": {"url": "https://buffer-media-uploads.s3/x.png"}}])
+r6, esc6, _ = materializar(mixta, c6)
+chequear("deja la imagen como estaba", r6 == CDN + "/vieja.png", r6)
+chequear("no subio nada", not c6.subidos)
+chequear("ni escribio en Notion", not esc6)
 
 print(f"\n{ok} OK, {fallo} FALLA")
 sys.exit(1 if fallo else 0)

@@ -69,7 +69,10 @@ def correr(filas, posts, cuerpos):
                 "deletePost": {"__typename": "DeletePostSuccess", "id": "x"}}
 
     m.buffer_gql = gql
-    n, err, esp, hue = m.correr(ESPACIO, True, lambda *a: None)
+    # `avisos` es la quinta lista desde el 2026-08-26: un aviso no es un error y no puede
+    # cambiar el codigo de salida. Se desempaqueta explicito para que este banco falle si la
+    # firma vuelve a cambiar, en vez de tragarselo con un *_.
+    n, err, esp, hue, avi = m.correr(ESPACIO, True, lambda *a: None)
     return env, n, err
 
 

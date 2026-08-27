@@ -237,20 +237,40 @@ def prop_txt(p):
     return ""
 
 
-def prop_placa(p):
-    """URL de descarga del primer adjunto de una propiedad de tipo `files`.
+def prop_placas(p):
+    """URLs de descarga de TODOS los adjuntos de una propiedad de tipo `files`, EN ORDEN.
 
     Notion devuelve dos formas: 'file' es un archivo subido a Notion, y su URL esta FIRMADA y
     expira en el orden de una hora -por eso hay que bajarla ahora y no guardarla-; 'external' es
-    un archivo enlazado desde afuera."""
+    un archivo enlazado desde afuera.
+
+    El orden del array es el que se ve en Notion, y es el que Esteban controla arrastrando los
+    archivos dentro de la propiedad. Ese orden ES el orden de publicacion (seccion 9)."""
     if not p or p.get("type") != "files":
-        return ""
+        return []
+    out = []
     for f in p["files"] or []:
         if f.get("type") == "file":
-            return (f.get("file") or {}).get("url", "")
-        if f.get("type") == "external":
-            return (f.get("external") or {}).get("url", "")
-    return ""
+            u = (f.get("file") or {}).get("url", "")
+        elif f.get("type") == "external":
+            u = (f.get("external") or {}).get("url", "")
+        else:
+            u = ""
+        if u:
+            out.append(u)
+    return out
+
+
+def urls(s):
+    """`imagen` guarda N URLs separadas por espacios, en orden. Es un campo de tipo `url` en
+    Notion, y `[CONFIRMADO]` 2026-08-26 Notion acepta y devuelve ese string intacto: no valida
+    el formato. Se eligio asi para NO tener que cambiar el tipo de la propiedad, que es
+    estructura de la base y la toca Esteban, no el sync."""
+    return (s or "").split()
+
+
+def junta(lista):
+    return " ".join(lista)
 
 
 def filas_notion(espacio, canales):
@@ -330,19 +350,23 @@ def p_date(v):   return {"date": {"start": v} if v else None}
 
 # --------------------------------------------------------------------------- placas
 
-def materializar(fila, pr, imagen, cliente, cdn, espacio, aplicar, log, nombre):
-    """Paso 0 de la seccion 9: la placa que se arrastro a Notion se sube al bucket y su URL
-    publica queda escrita en `imagen`.
+def materializar(fila, pr, imagen, cliente, cdn, espacio, aplicar, log, nombre, canal, avisos):
+    """Paso 0 de la seccion 9: las placas que se arrastraron a Notion se suben al bucket y sus
+    URLs publicas quedan escritas en `imagen`, separadas por espacio y EN EL MISMO ORDEN.
 
-    El reparto es: `placa` (adjunto) es la superficie humana y la unica que se toca a mano; el
-    bucket es donde Buffer puede leerla el dia que publica; `imagen` es el puente y la escribe
+    El reparto es: `placa` (adjuntos) es la superficie humana y la unica que se toca a mano; el
+    bucket es donde Buffer puede leerlas el dia que publica; `imagen` es el puente y la escribe
     la maquina. Devuelve la imagen que corresponde usar en esta corrida, para que el hash de la
     seccion 8 y el payload la vean ya resuelta.
-    """
-    origen = prop_placa(pr.get(P["placa"]))
 
-    if not origen:
-        # No hay adjunto. Si `imagen` apunta al CDN propio, la placa estuvo y se la sacaron: se
+    Varias imagenes por pieza `[CONFIRMADO]` 2026-08-26: la propiedad `Placa` siempre admitio
+    varios archivos y el sync subia solo el primero, en silencio. Como el string entero entra al
+    hash, agregar, quitar o REORDENAR archivos dispara sola la actualizacion en Buffer.
+    """
+    origenes = prop_placas(pr.get(P["placa"]))
+
+    if not origenes:
+        # No hay adjuntos. Si `imagen` apunta al CDN propio, la placa estuvo y se la sacaron: se
         # limpia para que la regla (d) pueda avisar que una edicion no puede dejar un post sin
         # placa. Si es una URL cargada a mano, se respeta y no se toca: es el caso de las piezas
         # cuya placa se subio por la app web.
@@ -353,38 +377,69 @@ def materializar(fila, pr, imagen, cliente, cdn, espacio, aplicar, log, nombre):
             return ""
         return imagen
 
-    # La placa apunta a un host que no es de este sync: lo tipico es una URL del S3 de Buffer,
+    # Alguna placa apunta a un host que no es de este sync: lo tipico es una URL del S3 de Buffer,
     # que la app web usa para las placas que se suben desde ahi. NO se materializa, y no es una
     # preferencia: `[CONFIRMADO]` 2026-08-07 esas URLs son PRIVADAS (S3 responde AccessDenied),
     # asi que no se pueden descargar para subirlas ni sirven adjuntadas en Notion. Intentarlo
     # daria un error por fila en cada corrida. Se devuelve `imagen` intacta para no mover el hash.
-    if any(h in origen for h in HOSTS_AJENOS):
+    #
+    # Basta UNA ajena para no tocar la fila entera: materializar solo las demas cambiaria `imagen`
+    # y dispararia una edicion que dejaria el post con menos placas de las que tiene. Conservador
+    # a proposito, y es la misma semantica que tenia con una sola.
+    if any(any(h in o for h in HOSTS_AJENOS) for o in origenes):
         return imagen
 
-    # Ya apunta al CDN propio: es la URL final, no hay nada que descargar ni subir. Pasa cuando
-    # la placa se adjunto como archivo externo, y ahorra una descarga por fila en cada corrida.
-    if origen.startswith(cdn):
-        if origen != imagen:
-            log(f"  placa       {nombre}  (ya en el CDN)")
-            if aplicar:
-                escribir(fila["id"], {P["imagen"]: p_url(origen)}, cover=portada(fila, origen, cdn))
-        return origen
+    # Se resuelve cada adjunto por separado, conservando el orden. Los que ya apuntan al CDN
+    # propio son su propia URL final: no hay nada que descargar ni subir, y ahorra una descarga
+    # por archivo en cada corrida.
+    finales, pendientes, peso_total, vistas = [], [], 0, set()
+    for o in origenes:
+        if o.startswith(cdn):
+            finales.append(o)
+            continue
+        url, key, contenido, ct, peso = almacenamiento.analizar(cliente, o, cdn)
+        finales.append(url)
+        # Dedup DENTRO de la fila: dos adjuntos con el mismo contenido dan la misma clave, y sin
+        # esto se subian dos veces, porque cada uno consulta el bucket por separado y la primera
+        # subida todavia no se ve. El post igual las lleva las dos veces si asi se cargaron: lo
+        # que se deduplica es la subida, no lo que se publica.
+        if key in vistas:
+            continue
+        vistas.add(key)
+        peso_total += peso
+        pendientes.append((key, contenido, ct, peso))
 
-    url, key, contenido, ct, peso = almacenamiento.analizar(cliente, origen, cdn)
-    if url == imagen:
+    nueva = junta(finales)
+    if nueva == imagen:
         return imagen                       # ya materializada: no se toca R2 ni para preguntar
 
-    # Aviso, no bloqueo. El sync NO comprime a proposito: la clave es el hash del contenido, asi
-    # que si comprimiera, la clave dependeria del resultado de la compresion y el dia que cambiara
-    # la libreria o un parametro se re-subirian TODAS las placas y se editarian TODOS los posts.
+    # Aviso, no bloqueo, y por dos motivos distintos:
+    #
+    # Peso: el sync NO comprime a proposito. La clave es el hash del contenido, asi que si
+    # comprimiera, la clave dependeria del resultado de la compresion y el dia que cambiara la
+    # libreria o un parametro se re-subirian TODAS las placas y se editarian TODOS los posts.
     # Optimizar es del lado del diseno, donde se ve el resultado.
-    gordo = peso > ALM.get("aviso_peso_mb", 1) * 1024 * 1024
-    log(f"  placa       {nombre}  ({peso // 1024} KB)" + ("  conviene optimizarla" if gordo else ""))
+    #
+    # Cantidad: cada red tiene su tope de imagenes por post y NO estan verificados contra la API
+    # desde aca, asi que el sync avisa y deja decidir a Buffer. Si Buffer rechaza, la fila se
+    # reporta y NO se guarda su hash (seccion 11-d), que es el comportamiento correcto: se
+    # reintenta sola en la corrida siguiente. Inventar un limite duro seria peor que este aviso.
+    tope = (CFG.get("imagenes_por_canal") or {}).get(canal)
+    if tope and len(finales) > tope:
+        avisos.append(f"{nombre}: {len(finales)} imagenes y {canal} suele aceptar {tope}. "
+                      f"Se manda igual; si Buffer la rechaza, la fila se reporta y se reintenta.")
+
+    gordo = peso_total > ALM.get("aviso_peso_mb", 1) * 1024 * 1024
+    cuantas = f"{len(finales)} imagen" + ("es" if len(finales) != 1 else "")
+    log(f"  placa       {nombre}  ({cuantas}, {peso_total // 1024} KB)"
+        + ("  conviene optimizarlas" if gordo else ""))
     if aplicar:
-        if not cliente.existe(key):         # la misma placa nunca se sube dos veces
-            cliente.subir(key, contenido, ct, {"espacio": espacio, "pieza": fila["id"]})
-        escribir(fila["id"], {P["imagen"]: p_url(url)}, cover=portada(fila, url, cdn))
-    return url
+        for key, contenido, ct, peso in pendientes:
+            if not cliente.existe(key):     # la misma placa nunca se sube dos veces
+                cliente.subir(key, contenido, ct, {"espacio": espacio, "pieza": fila["id"]})
+        # Una sola escritura a Notion por fila, con las N URLs ya resueltas.
+        escribir(fila["id"], {P["imagen"]: p_url(nueva)}, cover=portada(fila, finales[0], cdn))
+    return nueva
 
 
 def portada(fila, url, cdn):
@@ -447,12 +502,23 @@ def posts_buffer(key, org):
 
 
 def assets_img(imagen, texto):
-    """Forma verificada por introspeccion (2026-08-06): ImageAssetInput es {url, thumbnailUrl,
+    """Un asset por imagen, EN ORDEN. `imagen` trae N URLs separadas por espacio.
+
+    Forma verificada por introspeccion (2026-08-06): ImageAssetInput es {url, thumbnailUrl,
     metadata}, y `altText` vive DENTRO de ImageMetadataInput, no al lado de `url`. Mandarlo
-    plano es un InvalidInputError."""
-    if not imagen:
+    plano es un InvalidInputError.
+
+    Que Buffer acepte varios y RESPETE EL ORDEN esta `[CONFIRMADO]` 2026-08-26 contra la API,
+    con un borrador real de 3 imagenes que se creo, se releyo y se borro. El schema ya declaraba
+    `assets` como lista, pero una ruta que nunca se ejecuto no esta verificada."""
+    lista = urls(imagen)
+    if not lista:
         return []
-    return [{"image": {"url": imagen, "metadata": {"altText": texto[:100]}}}]
+    n = len(lista)
+    alt = texto[:100]
+    return [{"image": {"url": u, "metadata": {
+                "altText": alt if n == 1 else f"{alt} ({i} de {n})"}}}
+            for i, u in enumerate(lista, 1)]
 
 
 def thread_x(tramos):
@@ -493,6 +559,10 @@ def correr(espacio, aplicar, log):
 
     n = dict(programadas=0, actualizadas=0, publicadas=0, canceladas=0)
     errores, esperando, huerfanos = [], [], []
+    # Un aviso NO es un error: la fila se procesa igual y el codigo de salida sigue siendo 0.
+    # Van separados porque mezclarlos haria que la rutina programada muestre en rojo una corrida
+    # que salio bien, y una alarma que suena sin motivo es la que hace que nadie mire el log.
+    avisos = []
 
     # ---- paso 2: reconciliacion. Un post sin fila NO se borra: se reporta y se deja.
     conocidos = {prop_txt(f["properties"].get(P["post_id"])) for f in filas}
@@ -574,7 +644,8 @@ def correr(espacio, aplicar, log):
             # paso 0 (seccion 9): resolver la placa ANTES de hashear. La URL entra al hash, asi
             # que una placa nueva o cambiada dispara sola la actualizacion en Buffer.
             if cliente:
-                imagen = materializar(f, pr, imagen, cliente, cdn, espacio, aplicar, log, nombre)
+                imagen = materializar(f, pr, imagen, cliente, cdn, espacio, aplicar, log,
+                                      nombre, canal, avisos)
 
             # longitud: nunca cortar, resumir ni reescribir
             if canal == "X" and len(tramos) > 1:
@@ -695,7 +766,7 @@ def correr(espacio, aplicar, log):
             errores.append(f"{nombre}: {e}")
 
     log("  cupo: " + " · ".join(f"{c} {agendados[c]}/{CUPO}" for c in canales))
-    return n, errores, esperando, huerfanos
+    return n, errores, esperando, huerfanos, avisos
 
 
 # Corriendo desatendido el log es lo unico que queda de una corrida, asi que su ruta es un dato
@@ -727,7 +798,7 @@ def main():
 
     print(f"Sync {datetime.now(AR):%d/%m %H:%M} - modo {'REAL' if aplicar else 'SECO (no escribe nada)'}")
     total = dict(programadas=0, actualizadas=0, publicadas=0, canceladas=0)
-    errores, esperando, huerfanos = [], [], []
+    errores, esperando, huerfanos, avisos = [], [], [], []
     cortadas = 0
 
     for espacio in ESPACIOS:
@@ -735,7 +806,7 @@ def main():
             continue
         print(f"\n{espacio}")
         try:
-            n, e, w, h = correr(espacio, aplicar, print)
+            n, e, w, h, av = correr(espacio, aplicar, print)
         except Exception as exc:                        # no se puede conectar: cortar sin tocar nada
             print(f"  CORTADO: {exc}")
             errores.append(f"{espacio}: {exc}")
@@ -746,12 +817,14 @@ def main():
         errores += [f"{espacio} · {x}" for x in e]
         esperando += [f"{espacio} · {x}" for x in w]
         huerfanos += [f"{espacio} · {x}" for x in h]
+        avisos += [f"{espacio} · {x}" for x in av]
 
     print(f"\nSync {datetime.now(AR):%d/%m %H:%M} - {total['programadas']} programadas, "
           f"{total['actualizadas']} actualizadas, {total['publicadas']} publicadas, "
           f"{total['canceladas']} canceladas. "
           + ("Sin errores." if not errores else f"{len(errores)} error(es)."))
     for x in errores:   print(f"  error:    {x}")
+    for x in avisos:    print(f"  aviso:    {x}")
     for x in esperando: print(f"  esperando cupo: {x}")
     for x in huerfanos: print(f"  huerfano (no se toca): {x}")
 

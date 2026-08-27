@@ -24,7 +24,7 @@ se puede cambiar es el **tipo**.
 | `Canal` | Selección | `LinkedIn`, `X`, `Facebook`. Tiene que coincidir **exactamente** con lo que declaraste en la configuración. |
 | `Marca` | Selección | De qué cuenta es la pieza. Si tenés una sola, igual hace falta: es lo que impide que una pieza salga por la cuenta equivocada. |
 | `Fecha de publicación` | Fecha | Cuándo sale. **Podés dejarla vacía:** el sistema le asigna el próximo horario libre de ese canal y te la escribe. |
-| `Placa` | Archivos y multimedia | Arrastrás la imagen acá y no hacés nada más. |
+| `Placa` | Archivos y multimedia | Arrastrás la imagen acá y no hacés nada más. **Podés arrastrar varias:** salen en el orden en que las ves. |
 | `Archivo` | Casilla | Marcala para sacar una fila de circulación sin borrarla. Las archivadas se ignoran. |
 
 ### Las que toca solo el programa

@@ -32,7 +32,7 @@ la única que importa: **decir que sí**.
 ## Cómo se siente usarlo
 
 1. Escribís la pieza en Notion, como escribirías cualquier nota. Le ponés el canal y la marca.
-2. Si lleva imagen, la arrastrás al campo `Placa`. Nada más.
+2. Si lleva imagen, la arrastrás al campo `Placa`. Nada más. **Si lleva varias, las arrastrás todas: salen en el orden en que las ves.**
 3. Cuando estás conforme, cambiás el estado a **Aprobado**.
 4. No hacés nada más.
 
