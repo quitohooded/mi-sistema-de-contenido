@@ -13,6 +13,7 @@
 # El caso 8 es un CONTROL NEGATIVO: si el hash coincide no puede pasar nada. Sin el, un banco
 # que solo comprueba que no pasa nada malo pasaria igual con el sync entero comentado.
 import sys, json, pathlib
+from datetime import datetime, timedelta
 
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
 import sync_notion_buffer as m
@@ -28,7 +29,13 @@ CID_LI = _canales.get("LinkedIn") or list(_canales.values())[-1]
 # de reportar tres FALLA sobre un motor sano.
 DOS_CANALES = CID_X != CID_LI
 P, EST = m.P, m.EST
-FUT = "2026-09-15T10:50:00-03:00"
+# Una fecha futura RELATIVA a hoy, en la zona del config. Estuvo escrita como literal
+# ("2026-09-15T10:50:00-03:00") y el banco empezo a fallar solo el dia que esa fecha paso: la
+# creacion rechaza una fecha vencida (seccion 11-e), asi que el caso 7 dejo de crear y media un
+# `null`. Se genera con `m.AR` y no con un offset escrito a mano para que su isoformat() coincida
+# con el que calcula el motor, y asi los hashes de los casos 5a y 8 se cumplan en cualquier zona.
+FUT = (datetime.now(m.AR) + timedelta(days=60)).replace(
+    hour=10, minute=50, second=0, microsecond=0).isoformat()
 S3 = [{"type": "image", "source": "https://buffer-media-uploads.s3.amazonaws.com/x_linkedin"}]
 PROPIA = [{"type": "image", "source": "https://cdn.ejemplo.com/placas/vieja.png"}]
 
