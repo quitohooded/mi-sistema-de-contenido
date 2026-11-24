@@ -22,7 +22,7 @@
 #
 #   --config <ruta>   usar otro archivo de configuracion
 
-import json, sys, hashlib, re, pathlib, urllib.request, urllib.error
+import json, sys, hashlib, re, pathlib, time, urllib.request, urllib.error
 from datetime import datetime, timedelta, timezone
 
 import almacenamiento
@@ -102,18 +102,32 @@ def _abrir(req):
     mata a los 15 min, pero muere sin linea de cierre en el log y sin codigo de salida
     propio, o sea un cuelgue mudo); y sin leer el cuerpo del HTTPError el mensaje queda en
     'HTTP Error 400: Bad Request', justo cuando el cuerpo es donde Notion dice QUE propiedad
-    fallo. Desatendido, el log es lo unico que queda."""
-    try:
-        return json.loads(urllib.request.urlopen(req, timeout=TIMEOUT).read())
-    except urllib.error.HTTPError as e:
-        detalle = ""
+    fallo. Desatendido, el log es lo unico que queda. Reintenta HTTP 429 (rate limit) respetando
+    Retry-After hasta 5 veces."""
+    for intento in range(6):
         try:
-            detalle = e.read().decode("utf-8", "replace")[:400]
-        except Exception:
-            pass
-        raise RuntimeError(f"HTTP {e.code} en {req.full_url}: {detalle or e.reason}") from None
-    except urllib.error.URLError as e:
-        raise RuntimeError(f"sin conexion con {req.full_url}: {e.reason}") from None
+            return json.loads(urllib.request.urlopen(req, timeout=TIMEOUT).read())
+        except urllib.error.HTTPError as e:
+            detalle = ""
+            try:
+                detalle = e.read().decode("utf-8", "replace")[:400]
+            except Exception:
+                pass
+            if e.code == 429 and intento < 5:
+                espera = 1.5
+                try:
+                    ra = e.headers.get("Retry-After") if e.headers else None
+                    if ra:
+                        espera = min(max(float(ra), 0.5), 30.0)
+                    else:
+                        espera = min(2.0 * (intento + 1), 20.0)
+                except Exception:
+                    espera = 2.0 * (intento + 1)
+                time.sleep(espera)
+                continue
+            raise RuntimeError(f"HTTP {e.code} en {req.full_url}: {detalle or e.reason}") from None
+        except urllib.error.URLError as e:
+            raise RuntimeError(f"sin conexion con {req.full_url}: {e.reason}") from None
 
 
 def _post(url, payload, headers):
@@ -216,6 +230,36 @@ def proximo_hueco(slots, canal, ocupados, desde):
         if cand.weekday() in dias and cand > d and cand not in ocupados:
             return cand
     raise RuntimeError(f"no hay hueco libre para {canal} en un ano")
+
+
+def parsear_fecha(fecha, canal, slots):
+    """Parsea una fecha ISO de Notion a la zona horaria del config (`AR`).
+    Si viene solo el dia ('YYYY-MM-DD', 10 caracteres) y el canal esta en `slots`,
+    aplica la hora y el minuto del slot en zona `AR` (sin depender del huso local del SO)."""
+    s = fecha.strip()
+    d = datetime.fromisoformat(s.replace("Z", "+00:00"))
+    if d.tzinfo is None:
+        d = d.replace(tzinfo=AR)
+    else:
+        d = d.astimezone(AR)
+    if len(s) == 10 and canal in slots:
+        _, hh, mm = slots[canal]
+        d = d.replace(hour=hh, minute=mm, second=0, microsecond=0)
+    return d
+
+
+def _orden_creacion(f, slots):
+    """Clave de orden cronologico para (e) creacion: filas con fecha primero (por datetime
+    resuelto, incluyendo hora del slot si vino solo el dia) y filas sin fecha al final."""
+    pr = f["properties"]
+    fecha = prop_txt(pr.get(P["fecha"]))
+    canal = prop_txt(pr.get(P["canal"]))
+    if not fecha:
+        return (1, datetime.max.replace(tzinfo=AR))
+    try:
+        return (0, parsear_fecha(fecha, canal, slots))
+    except Exception:
+        return (0, datetime.max.replace(tzinfo=AR))
 
 
 # --------------------------------------------------------------------------- Notion
@@ -557,7 +601,7 @@ def correr(espacio, aplicar, log):
     mios = {i: p for i, p in posts.items() if p["channelId"] in inv}
     filas = filas_notion(espacio, canales)
 
-    n = dict(programadas=0, actualizadas=0, publicadas=0, canceladas=0)
+    n = dict(programadas=0, actualizadas=0, publicadas=0, canceladas=0, desalojadas=0)
     errores, esperando, huerfanos = [], [], []
     # Un aviso NO es un error: la fila se procesa igual y el codigo de salida sigue siendo 0.
     # Van separados porque mezclarlos haria que la rutina programada muestre en rojo una corrida
@@ -579,7 +623,15 @@ def correr(espacio, aplicar, log):
             ocupados[inv[p["channelId"]]].add(
                 datetime.fromisoformat(p["dueAt"].replace("Z", "+00:00")).astimezone(AR))
 
-    # ---- paso 3: procesar cada fila, primer caso que coincide
+    # Posts scheduled gestionados (tienen fila Aprobado sana en Notion y siguen scheduled tras
+    # el pase 1). Sirven para desalojar el mas lejano en (e) cuando el cupo esta lleno y entra
+    # una pieza con fecha estrictamente anterior. NUNCA incluye huerfanos ni publicados.
+    gestionados = {c: {} for c in canales}   # canal -> {bpid: (due_actual, fila, nombre)}
+    por_crear = []
+
+    # ---- paso 3a: procesar primero todas las filas con post existente o terminales (a, b, c, d),
+    # para que cancelaciones y reprogramaciones actualicen cupo, huecos ocupados y fechas reales
+    # ANTES de procesar (e) creacion (sin depender de si la cancelada tenia fecha mas lejana).
     for f in sorted(filas, key=lambda f: prop_txt(f["properties"].get(P["fecha"])) or "9"):
         pr = f["properties"]
         nombre = prop_txt(pr.get(P["titulo"]))[:50]
@@ -619,19 +671,27 @@ def correr(espacio, aplicar, log):
             if post and estado != EST["aprobado"] and post["status"] == "scheduled":
                 log(f"  cancelada   {canal:9} {nombre}")
                 if aplicar:
-                    buffer_gql(key, M_DELETE, {"input": {"id": bpid}})
+                    rd = buffer_gql(key, M_DELETE, {"input": {"id": bpid}})["deletePost"]
+                    if rd["__typename"] != "DeletePostSuccess":
+                        raise RuntimeError(rd.get("message", rd["__typename"]))
                     escribir(f["id"], {P["post_id"]: p_text(""), P["hash"]: p_text(""),
                                        P["last_sync"]: p_date(ahora.isoformat())})
-                # el lugar queda libre EN ESTA corrida: sin esto, una pieza que espera cupo
-                # se reporta como esperando aunque el hueco acabe de abrirse
-                agendados[canal] -= 1
+                # el lugar queda libre EN ESTA corrida y antes de (e), sin depender del orden
+                # de fechas entre la cancelada y las piezas nuevas
+                canal_post = inv[post["channelId"]]
+                agendados[canal_post] -= 1
                 if post.get("dueAt"):
-                    ocupados[canal].discard(
+                    ocupados[canal_post].discard(
                         datetime.fromisoformat(post["dueAt"].replace("Z", "+00:00")).astimezone(AR))
                 n["canceladas"] += 1
                 continue
 
             if estado != EST["aprobado"]:
+                continue
+
+            # Sin post existente: queda para el paso 3b ((e) creacion).
+            if not post:
+                por_crear.append(f)
                 continue
 
             texto, tramos = cuerpo(f["id"])
@@ -664,87 +724,177 @@ def correr(espacio, aplicar, log):
             # aplicarlas todas. Lo que no se pueda aplicar se reporta y NO se guarda el hash:
             # guardarlo dejaria la fila marcada como sincronizada mintiendo, y eso no vuelve a
             # avisar nunca mas.
-            if post:
-                if not post.get("dueAt"):
-                    errores.append(f"{nombre}: su post esta {post['status']} y sin fecha en Buffer")
-                    continue
-
-                due = datetime.fromisoformat(post["dueAt"].replace("Z", "+00:00")).astimezone(AR)
-                due_notion = (datetime.fromisoformat(fecha.replace("Z", "+00:00")).astimezone(AR)
-                              if fecha else due)
-                h = hashear(texto, due_notion.isoformat(), cid, imagen)
-                if h == prop_txt(pr.get(P["hash"])):
-                    continue
-
-                # De aca en adelante hay algo que aplicar, y recien aca corresponde preguntarse
-                # si se puede. Estos chequeos van DESPUES de comparar el hash a proposito: antes,
-                # le gritaban todos los dias a 4 piezas que estaban perfectamente sincronizadas,
-                # y una alarma que suena siempre es peor que no tener alarma.
-                if post["channelId"] != cid:
-                    errores.append(f"{nombre}: la fila dice {canal} y el post esta en otro canal. "
-                                   f"Buffer no puede mover un post de canal: sacala de "
-                                   f"{EST['aprobado']} para que se cancele, y volve a aprobarla.")
-                    continue
-                # Notion no declara imagen pero el post tiene una. Si la subio una persona por la
-                # app web vive en buffer-media-uploads y hay que preservarla (omitir `assets` lo hace);
-                # si apunta a un dominio propio la puso este sync desde Notion, asi que la sacaron
-                # de la fila y esta edicion no puede borrarla. Solo ese caso se reporta.
-                if not imagen and any(a.get("type") == "image"
-                                      and not any(h in (a.get("source") or "")
-                                                  for h in HOSTS_AJENOS)
-                                      for a in (post.get("assets") or [])):
-                    errores.append(f"{nombre}: la fila ya no declara `Imagen` pero el post tiene "
-                                   f"la placa puesta por el sync, y una edicion no puede quitarla. "
-                                   f"Cancelala y volve a aprobarla.")
-                    continue
-
-                cambio_fecha = due_notion != due
-                log(f"  actualizada {canal:9} {nombre}" + ("  (+reprograma)" if cambio_fecha else ""))
-                if aplicar:
-                    inp = {"id": bpid, "text": texto}   # el text va SIEMPRE: si se omite, falla
-                    if cambio_fecha:                    # mandar mode reprograma aunque no cambie
-                        inp["mode"] = "customScheduled"
-                        inp["dueAt"] = due_notion.isoformat()
-                    if imagen:
-                        # solo cuando Notion la declara: omitir `assets` preserva la que haya
-                        # (verificado, seccion 14), asi que mandarlo vacio la borraria
-                        inp["assets"] = assets_img(imagen, texto)
-                    if canal == "Facebook":
-                        # Facebook exige `type` tambien AL EDITAR, no solo al crear.
-                        # `[CONFIRMADO]` 2026-08-07: sin esto la edicion vuelve con
-                        # "Invalid post: Facebook posts require a type (post, story, or reel)".
-                        # No se habia ejercitado nunca porque las pruebas de edicion del
-                        # 2026-08-06 fueron todas sobre X.
-                        inp["metadata"] = {"facebook": {"type": "post"}}
-                    era_hilo = ((post.get("metadata") or {}).get("threadCount") or 0) > 1
-                    if canal == "X" and (len(tramos) > 1 or era_hilo):
-                        # el text exterior es el primer tramo, igual que al crear. Y si dejo de
-                        # ser hilo hay que mandar el thread igual, de un solo tramo: omitir
-                        # metadata PRESERVA los tramos viejos en vez de borrarlos.
-                        inp["text"] = tramos[0]
-                        inp["metadata"] = {"twitter": {"thread": thread_x(tramos)}}
-                    r = buffer_gql(key, M_EDIT, {"input": inp})["editPost"]
-                    if r["__typename"] != "PostActionSuccess":
-                        raise RuntimeError(r.get("message", r["__typename"]))
-                    escribir(f["id"], {P["hash"]: p_text(h),
-                                       P["last_sync"]: p_date(ahora.isoformat())})
-                n["actualizadas"] += 1
+            if not post.get("dueAt"):
+                errores.append(f"{nombre}: su post esta {post['status']} y sin fecha en Buffer")
                 continue
 
-            # (e) creacion
-            if agendados[canal] >= CUPO:
-                esperando.append(f"{canal} · {nombre}")
+            due = datetime.fromisoformat(post["dueAt"].replace("Z", "+00:00")).astimezone(AR)
+            due_notion = parsear_fecha(fecha, canal, slots) if fecha else due
+            h = hashear(texto, due_notion.isoformat(), cid, imagen)
+
+            # Un post solo puede ser desalojado en (e) si esta scheduled en el mismo canal,
+            # sigue sano y no depende de una placa privada cargada a mano en Buffer S3.
+            asset_ajeno_sin_notion = (
+                not imagen and any(
+                    a.get("type") == "image"
+                    and any(hj in (a.get("source") or "") for hj in HOSTS_AJENOS)
+                    for a in (post.get("assets") or [])
+                )
+            )
+            elegible_desalojo = (
+                post["status"] == "scheduled"
+                and post["channelId"] == cid
+                and not asset_ajeno_sin_notion
+            )
+
+            if h == prop_txt(pr.get(P["hash"])):
+                if elegible_desalojo:
+                    gestionados[canal][bpid] = (due, f, nombre)
                 continue
+
+            # De aca en adelante hay algo que aplicar, y recien aca corresponde preguntarse
+            # si se puede. Estos chequeos van DESPUES de comparar el hash a proposito: antes,
+            # le gritaban todos los dias a 4 piezas que estaban perfectamente sincronizadas,
+            # y una alarma que suena siempre es peor que no tener alarma.
+            if post["channelId"] != cid:
+                errores.append(f"{nombre}: la fila dice {canal} y el post esta en otro canal. "
+                               f"Buffer no puede mover un post de canal: sacala de "
+                               f"{EST['aprobado']} para que se cancele, y volve a aprobarla.")
+                continue
+            # Notion no declara imagen pero el post tiene una. Si la subio una persona por la
+            # app web vive en buffer-media-uploads y hay que preservarla (omitir `assets` lo hace);
+            # si apunta a un dominio propio la puso este sync desde Notion, asi que la sacaron
+            # de la fila y esta edicion no puede borrarla. Solo ese caso se reporta.
+            if not imagen and any(a.get("type") == "image"
+                                  and not any(hj in (a.get("source") or "")
+                                              for hj in HOSTS_AJENOS)
+                                  for a in (post.get("assets") or [])):
+                errores.append(f"{nombre}: la fila ya no declara `Imagen` pero el post tiene "
+                               f"la placa puesta por el sync, y una edicion no puede quitarla. "
+                               f"Cancelala y volve a aprobarla.")
+                continue
+
+            cambio_fecha = due_notion != due
+            if cambio_fecha and due_notion <= ahora:
+                errores.append(f"{nombre}: fecha {due_notion:%Y-%m-%d %H:%M} ya paso, vencida")
+                continue
+
+            log(f"  actualizada {canal:9} {nombre}" + ("  (+reprograma)" if cambio_fecha else ""))
+            if aplicar:
+                inp = {"id": bpid, "text": texto}   # el text va SIEMPRE: si se omite, falla
+                if cambio_fecha:                    # mandar mode reprograma aunque no cambie
+                    inp["mode"] = "customScheduled"
+                    inp["dueAt"] = due_notion.isoformat()
+                if imagen:
+                    # solo cuando Notion la declara: omitir `assets` preserva la que haya
+                    # (verificado, seccion 14), asi que mandarlo vacio la borraria
+                    inp["assets"] = assets_img(imagen, texto)
+                if canal == "Facebook":
+                    # Facebook exige `type` tambien AL EDITAR, no solo al crear.
+                    # `[CONFIRMADO]` 2026-08-07: sin esto la edicion vuelve con
+                    # "Invalid post: Facebook posts require a type (post, story, or reel)".
+                    # No se habia ejercitado nunca porque las pruebas de edicion del
+                    # 2026-08-06 fueron todas sobre X.
+                    inp["metadata"] = {"facebook": {"type": "post"}}
+                era_hilo = ((post.get("metadata") or {}).get("threadCount") or 0) > 1
+                if canal == "X" and (len(tramos) > 1 or era_hilo):
+                    # el text exterior es el primer tramo, igual que al crear. Y si dejo de
+                    # ser hilo hay que mandar el thread igual, de un solo tramo: omitir
+                    # metadata PRESERVA los tramos viejos en vez de borrarlos.
+                    inp["text"] = tramos[0]
+                    inp["metadata"] = {"twitter": {"thread": thread_x(tramos)}}
+                r = buffer_gql(key, M_EDIT, {"input": inp})["editPost"]
+                if r["__typename"] != "PostActionSuccess":
+                    raise RuntimeError(r.get("message", r["__typename"]))
+                upd = {P["hash"]: p_text(h), P["last_sync"]: p_date(ahora.isoformat())}
+                if fecha and len(fecha.strip()) == 10:
+                    # Si la fecha vino sin hora, guardamos el timestamp resuelto para que Notion
+                    # muestre la hora real y un cambio futuro de slots no reprograme lo agendado.
+                    upd[P["fecha"]] = p_date(due_notion.isoformat())
+                escribir(f["id"], upd)
+            if cambio_fecha and post["status"] == "scheduled":
+                ocupados[canal].discard(due)
+                ocupados[canal].add(due_notion)
+            if elegible_desalojo:
+                gestionados[canal][bpid] = (due_notion if cambio_fecha else due, f, nombre)
+            n["actualizadas"] += 1
+
+        except Exception as e:                          # un error no frena el sync entero
+            errores.append(f"{nombre}: {e}")
+
+    # ---- paso 3b: (e) creacion, por fecha ascendente.
+    # Si el cupo esta lleno (agendados == CUPO) pero la pieza nueva tiene fecha estrictamente
+    # anterior al post scheduled gestionado mas lejano del mismo canal, se desaloja ese post
+    # (vuelve a esperar cupo en Notion) para que entre la pieza mas cercana.
+    for f in sorted(por_crear, key=lambda f: _orden_creacion(f, slots)):
+        pr = f["properties"]
+        nombre = prop_txt(pr.get(P["titulo"]))[:50]
+        canal = prop_txt(pr.get(P["canal"]))
+        cid = canales.get(canal)
+        try:
+            fecha = prop_txt(pr.get(P["fecha"]))
             if fecha:
-                due_notion = datetime.fromisoformat(fecha.replace("Z", "+00:00")).astimezone(AR)
-                if len(fecha) == 10:                    # dia sin hora: se aplica la hora del slot
-                    _, hh, mm = slots[canal]
-                    due_notion = due_notion.replace(hour=hh, minute=mm)
+                due_notion = parsear_fecha(fecha, canal, slots)
             else:
                 due_notion = proximo_hueco(slots, canal, ocupados[canal], ahora)
             if due_notion <= ahora:
                 errores.append(f"{nombre}: fecha {due_notion:%Y-%m-%d %H:%M} ya paso, vencida")
                 continue
+
+            # Chequear cupo ANTES de leer el cuerpo o materializar placas: con 200+ piezas
+            # aprobadas en cola futura, leer blocks/children para piezas que no pueden entrar hoy
+            # dispara HTTP 429 en Notion y sube placas meses antes de tiempo.
+            desalojable = None
+            if agendados[canal] >= CUPO:
+                if agendados[canal] == CUPO and gestionados[canal]:
+                    v_bpid, (v_due, v_fila, v_nombre) = max(
+                        gestionados[canal].items(), key=lambda kv: kv[1][0]
+                    )
+                    if due_notion < v_due:
+                        desalojable = (v_bpid, v_due, v_fila, v_nombre)
+                if not desalojable:
+                    esperando.append(f"{canal} · {nombre}")
+                    continue
+
+            texto, tramos = cuerpo(f["id"])
+            if not texto:
+                errores.append(f"{nombre}: el cuerpo esta vacio, no se publica")
+                continue
+            imagen = prop_txt(pr.get(P["imagen"]))
+
+            # paso 0 (seccion 9): resolver la placa ANTES de hashear.
+            if cliente:
+                imagen = materializar(f, pr, imagen, cliente, cdn, espacio, aplicar, log,
+                                      nombre, canal, avisos)
+
+            # longitud: nunca cortar, resumir ni reescribir
+            if canal == "X" and len(tramos) > 1:
+                largo = [t for t in tramos if len(t) > LIMITE.get("X", 10**9)]
+                if largo:
+                    errores.append(f"{nombre}: {len(largo)} tramo(s) de X pasan "
+                                   f"{LIMITE.get('X')}")
+                    continue
+            elif len(texto) > LIMITE.get(canal, 10**9):
+                errores.append(f"{nombre}: {len(texto)} caracteres, pasa el limite de {canal}")
+                continue
+
+            if desalojable:
+                v_bpid, v_due, v_fila, v_nombre = desalojable
+                log(f"  desalojada  {canal:9} {v_nombre} (entra mas cercana)")
+                if aplicar:
+                    rd = buffer_gql(key, M_DELETE, {"input": {"id": v_bpid}})["deletePost"]
+                    if rd["__typename"] != "DeletePostSuccess":
+                        raise RuntimeError(rd.get("message", rd["__typename"]))
+                    upd_v = {P["post_id"]: p_text(""), P["hash"]: p_text(""),
+                             P["last_sync"]: p_date(ahora.isoformat())}
+                    if not prop_txt(v_fila["properties"].get(P["fecha"])):
+                        upd_v[P["fecha"]] = p_date(v_due.isoformat())
+                    escribir(v_fila["id"], upd_v)
+                agendados[canal] -= 1
+                ocupados[canal].discard(v_due)
+                del gestionados[canal][v_bpid]
+                esperando.append(f"{canal} · {v_nombre}")
+                n["desalojadas"] += 1
 
             log(f"  programada  {canal:9} {due_notion:%d/%m %H:%M}  {nombre}")
             if aplicar:
@@ -797,7 +947,7 @@ def main():
         sys.stdout.write(t + "\n")
 
     print(f"Sync {datetime.now(AR):%d/%m %H:%M} - modo {'REAL' if aplicar else 'SECO (no escribe nada)'}")
-    total = dict(programadas=0, actualizadas=0, publicadas=0, canceladas=0)
+    total = dict(programadas=0, actualizadas=0, publicadas=0, canceladas=0, desalojadas=0)
     errores, esperando, huerfanos, avisos = [], [], [], []
     cortadas = 0
 
@@ -819,9 +969,10 @@ def main():
         huerfanos += [f"{espacio} · {x}" for x in h]
         avisos += [f"{espacio} · {x}" for x in av]
 
+    extra_des = f", {total['desalojadas']} desalojadas" if total["desalojadas"] else ""
     print(f"\nSync {datetime.now(AR):%d/%m %H:%M} - {total['programadas']} programadas, "
           f"{total['actualizadas']} actualizadas, {total['publicadas']} publicadas, "
-          f"{total['canceladas']} canceladas. "
+          f"{total['canceladas']} canceladas{extra_des}. "
           + ("Sin errores." if not errores else f"{len(errores)} error(es)."))
     for x in errores:   print(f"  error:    {x}")
     for x in avisos:    print(f"  aviso:    {x}")
